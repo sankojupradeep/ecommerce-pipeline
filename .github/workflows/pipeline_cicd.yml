@@ -1,0 +1,236 @@
+# .github/workflows/pipeline_cicd.yml
+# E-Commerce Revenue Pipeline — CI/CD Gate
+#
+# On every push:
+#   1. Lint + unit test PySpark code
+#   2. Run dbt against Snowflake staging schema
+#   3. ONLY promote to prod if ALL tests pass
+#   4. Slack alert on any failure
+
+name: Pipeline CI/CD
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.10"
+  DBT_PROFILES_DIR: ${{ github.workspace }}/.dbt
+  SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+
+jobs:
+
+  # ── Job 1: Lint + Unit Tests ──────────────────────────────────────────────
+  code-quality:
+    name: Lint & Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            flake8 \
+            pytest pytest-cov \
+            faker boto3
+
+      - name: flake8 lint
+        run: |
+          flake8 ingestion/ tests/ \
+            --max-line-length=120 \
+            --ignore=E501,W503 \
+            --exclude=.venv,__pycache__
+
+      - name: pytest unit tests
+        run: |
+          pytest tests/ -v \
+            --cov=ingestion \
+            --cov-report=xml \
+            --cov-fail-under=70
+        env:
+          OUTPUT_DIR: /tmp/test_data
+
+  # ── Job 2: dbt Test Gate ──────────────────────────────────────────────────
+  dbt-test-gate:
+    name: dbt Tests (Snowflake)
+    needs: code-quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt
+        run: pip install dbt-snowflake==1.7.0
+
+      - name: Write dbt profiles.yml
+        run: |
+          mkdir -p ${{ env.DBT_PROFILES_DIR }}
+          cat > ${{ env.DBT_PROFILES_DIR }}/profiles.yml << PROFILES
+          ecomm_pipeline:
+            target: ci
+            outputs:
+              ci:
+                type: snowflake
+                account: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+                user: ${{ secrets.SNOWFLAKE_USER }}
+                password: ${{ secrets.SNOWFLAKE_PASSWORD }}
+                role: ${{ secrets.SNOWFLAKE_ROLE }}
+                database: ${{ secrets.SNOWFLAKE_DATABASE }}
+                warehouse: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+                schema: ci_${{ github.run_id }}
+                threads: 4
+          PROFILES
+
+      - name: dbt deps
+        working-directory: dbt_project
+        run: dbt deps
+        env:
+          DBT_PROFILES_DIR: ${{ env.DBT_PROFILES_DIR }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+
+      - name: dbt source freshness
+        working-directory: dbt_project
+        run: dbt source freshness --target ci
+        env:
+          DBT_PROFILES_DIR: ${{ env.DBT_PROFILES_DIR }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+        continue-on-error: true
+
+      - name: dbt build (run + test)
+        working-directory: dbt_project
+        run: |
+          dbt build \
+            --target ci \
+            --full-refresh \
+            --fail-fast
+        env:
+          DBT_PROFILES_DIR: ${{ env.DBT_PROFILES_DIR }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+
+      - name: Upload dbt logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-logs-${{ github.run_id }}
+          path: dbt_project/logs/
+
+      - name: Cleanup CI schema
+        if: always()
+        run: |
+          pip install snowflake-connector-python
+          python - << 'PYEOF'
+          import snowflake.connector, os
+          conn = snowflake.connector.connect(
+              account=os.environ['SNOWFLAKE_ACCOUNT'],
+              user=os.environ['SNOWFLAKE_USER'],
+              password=os.environ['SNOWFLAKE_PASSWORD'],
+              role=os.environ['SNOWFLAKE_ROLE'],
+              warehouse=os.environ['SNOWFLAKE_WAREHOUSE'],
+          )
+          run_id = os.environ['GITHUB_RUN_ID']
+          db = os.environ['SNOWFLAKE_DATABASE']
+          conn.cursor().execute(f"DROP SCHEMA IF EXISTS {db}.ci_{run_id}")
+          print(f"Dropped CI schema: ci_{run_id}")
+          conn.close()
+          PYEOF
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+
+  # ── Job 3: Promote to Production ─────────────────────────────────────────
+  promote-to-prod:
+    name: Promote to Production
+    needs: dbt-test-gate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-southeast-1
+
+      - name: Upload scripts to S3 prod
+        run: |
+          aws s3 cp ingestion/generate_data.py \
+            s3://${{ secrets.S3_SCRIPTS_BUCKET }}/prod/scripts/generate_data.py
+          aws s3 cp ingestion/glue_bronze_ingestion.py \
+            s3://${{ secrets.S3_SCRIPTS_BUCKET }}/prod/scripts/glue_bronze_ingestion.py
+          echo "Promoted to production at $(date -u)"
+
+      - name: Set up Python + dbt
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt
+        run: pip install dbt-snowflake==1.7.0
+
+      - name: Write prod profiles.yml
+        run: |
+          mkdir -p ${{ env.DBT_PROFILES_DIR }}
+          cat > ${{ env.DBT_PROFILES_DIR }}/profiles.yml << PROFILES
+          ecomm_pipeline:
+            target: prod
+            outputs:
+              prod:
+                type: snowflake
+                account: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+                user: ${{ secrets.SNOWFLAKE_USER }}
+                password: ${{ secrets.SNOWFLAKE_PASSWORD }}
+                role: ${{ secrets.SNOWFLAKE_ROLE }}
+                database: ${{ secrets.SNOWFLAKE_DATABASE }}
+                warehouse: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+                schema: gold
+                threads: 8
+          PROFILES
+
+      - name: dbt run Production Gold
+        working-directory: dbt_project
+        run: dbt run --target prod
+        env:
+          DBT_PROFILES_DIR: ${{ env.DBT_PROFILES_DIR }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+
+  # ── Job 4: Slack alert on failure ────────────────────────────────────────
+  notify-failure:
+    name: Slack alert on failure
+    needs: [code-quality, dbt-test-gate, promote-to-prod]
+    runs-on: ubuntu-latest
+    if: failure()
+
+    steps:
+      - name: Slack failure notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": ":x: *ecomm-pipeline CI/CD FAILED*\nBranch: `${{ github.ref_name }}` | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
