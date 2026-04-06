@@ -1,8 +1,3 @@
-"""
-pytest unit tests for ingestion/data_genearation.py
-Run locally: pytest tests/ -v
-"""
-
 import pytest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
