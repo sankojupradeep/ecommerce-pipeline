@@ -1,0 +1,199 @@
+version: 2
+
+# ── Source freshness check (alerts if raw data > 6 hours stale) ───────────────
+sources:
+  - name: raw
+    database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+    schema: raw
+    freshness:
+      warn_after: {count: 6, period: hour}
+      error_after: {count: 12, period: hour}
+    loaded_at_field: created_at
+
+    tables:
+      - name: orders
+        description: "Raw orders from Glue Bronze ingestion"
+        freshness:
+          warn_after: {count: 6, period: hour}
+          error_after: {count: 12, period: hour}
+        columns:
+          - name: order_id
+            description: "Unique order identifier"
+            tests: [not_null, unique]
+          - name: customer_id
+            tests: [not_null]
+          - name: product_id
+            tests: [not_null]
+          - name: gmv
+            tests: [not_null]
+          - name: order_status
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ["DELIVERED", "SHIPPED", "CANCELLED", "RETURNED", "PROCESSING"]
+          - name: order_date
+            tests: [not_null]
+
+      - name: payments
+        description: "Raw payments from Glue Bronze ingestion"
+        freshness:
+          warn_after: {count: 6, period: hour}
+          error_after: {count: 12, period: hour}
+        columns:
+          - name: payment_id
+            tests: [not_null, unique]
+          - name: order_id
+            tests: [not_null]
+          - name: payment_status
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ["SUCCESS", "FAILED", "PENDING", "REFUNDED"]
+          - name: payment_method
+            tests:
+              - accepted_values:
+                  values: ["UPI", "Credit Card", "Debit Card", "Net Banking", "COD", "Wallet"]
+          - name: amount
+            tests: [not_null]
+
+      - name: products
+        description: "Raw product catalog from Glue Bronze ingestion"
+        freshness:
+          warn_after: {count: 24, period: hour}  # products change less frequently
+          error_after: {count: 48, period: hour}
+        columns:
+          - name: product_id
+            tests: [not_null, unique]
+          - name: category
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ["Electronics", "Fashion", "Home", "Beauty", "Sports", "Books", "Grocery"]
+          - name: selling_price
+            tests: [not_null]
+
+
+# ── Staging models ─────────────────────────────────────────────────────────────
+models:
+  - name: stg_orders
+    description: "Cleaned and typed orders — one row per order"
+    config:
+      materialized: view
+      schema: staging
+    columns:
+      - name: order_id
+        description: "Primary key"
+        tests: [not_null, unique]
+      - name: customer_id
+        tests: [not_null]
+      - name: product_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_products')
+              field: product_id
+      - name: order_status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["DELIVERED", "SHIPPED", "CANCELLED", "RETURNED", "PROCESSING"]
+      - name: gmv
+        description: "Gross merchandise value = unit_price × quantity"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: net_revenue
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: order_date
+        tests: [not_null]
+
+  - name: stg_payments
+    description: "Cleaned payments — one row per payment"
+    config:
+      materialized: view
+      schema: staging
+    columns:
+      - name: payment_id
+        tests: [not_null, unique]
+      - name: order_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: payment_status
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["SUCCESS", "FAILED", "PENDING", "REFUNDED"]
+      - name: amount
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+  - name: dim_products
+    description: "Product dimension — SCD Type 1 (overwrite on update)"
+    config:
+      materialized: table
+      schema: gold
+    columns:
+      - name: product_id
+        tests: [not_null, unique]
+      - name: category
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["Electronics", "Fashion", "Home", "Beauty", "Sports", "Books", "Grocery"]
+      - name: selling_price
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: margin_pct
+        description: "(selling_price - cost_price) / selling_price × 100"
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "between -100 and 100"
+
+  - name: fct_revenue
+    description: "Daily revenue fact — GMV, AOV, return rate per day"
+    config:
+      materialized: incremental
+      unique_key: order_date
+      schema: gold
+      on_schema_change: fail   # Blocks deployment on schema drift
+    columns:
+      - name: order_date
+        tests: [not_null, unique]
+      - name: total_orders
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: total_gmv
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: aov
+        description: "Average order value = total_gmv / total_orders"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: return_rate_pct
+        description: "% orders returned — alert if > 15%"
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 100"
+      - name: payment_success_rate_pct
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "between 0 and 100"

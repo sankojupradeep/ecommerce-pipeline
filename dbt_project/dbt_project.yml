@@ -1,0 +1,38 @@
+name: ecomm_pipeline
+version: "1.0.0"
+config-version: 2
+
+profile: ecomm_pipeline
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+analysis-paths: ["analyses"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  ecomm_pipeline:
+    staging:
+      +materialized: view
+      +schema: staging
+      +tags: ["staging"]
+    gold:
+      +materialized: table
+      +schema: gold
+      +tags: ["gold"]
+      fct_revenue:
+        +materialized: incremental
+
+vars:
+  max_return_rate_pct: 15
+  freshness_warn_hours: 6
+  freshness_error_hours: 12
+
+on-run-start:
+  - "{{ log('dbt run started at: ' ~ modules.datetime.datetime.now(), info=true) }}"
+
+on-run-end:
+  - "{{ log('dbt run finished. Models: ' ~ results | length, info=true) }}"
