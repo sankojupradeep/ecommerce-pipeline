@@ -1,7 +1,8 @@
+import sys
 import pytest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
-import sys
+
 
 # ── Mock boto3 so tests run without AWS credentials ───────────────────────────
 @pytest.fixture(autouse=True)
@@ -13,9 +14,6 @@ def mock_boto3():
 
 
 # ── Import after mocking boto3 ────────────────────────────────────────────────
-
-
-
 @pytest.fixture
 def gen():
     if "ingestion.data_genearation" in sys.modules:
@@ -25,7 +23,6 @@ def gen():
 
 
 # ── Product tests ─────────────────────────────────────────────────────────────
-
 class TestGenerateProducts:
     def test_correct_count(self, gen):
         products = gen.generate_products(n=10)
@@ -59,7 +56,6 @@ class TestGenerateProducts:
 
 
 # ── Order tests ───────────────────────────────────────────────────────────────
-
 class TestGenerateOrders:
     def test_correct_count(self, gen):
         products = gen.generate_products(n=10)
@@ -115,7 +111,6 @@ class TestGenerateOrders:
 
 
 # ── Payment tests ─────────────────────────────────────────────────────────────
-
 class TestGeneratePayments:
     def test_one_payment_per_order(self, gen):
         products = gen.generate_products(n=5)
@@ -155,7 +150,6 @@ class TestGeneratePayments:
 
 
 # ── Revenue calculation tests ─────────────────────────────────────────────────
-
 class TestRevenueCalculations:
     def test_aov_correct(self):
         assert round(50000 / 100, 2) == 500.0
@@ -182,7 +176,6 @@ class TestRevenueCalculations:
 
 
 # ── Schema drift detection tests ──────────────────────────────────────────────
-
 class TestSchemaDrift:
     def test_detects_null_primary_key(self):
         orders = [
@@ -213,4 +206,3 @@ class TestSchemaDrift:
         ]
         violations = [p for p in payments if p["amount"] < 0]
         assert len(violations) == 1
-
