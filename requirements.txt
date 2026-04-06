@@ -1,0 +1,6 @@
+faker
+boto3
+pytest
+pytest-cov
+flake8
+flake8
