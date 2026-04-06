@@ -226,7 +226,7 @@ def run_full():
         "mode": "full",
     })
 
-    print(f"\nFull load complete.")
+    print("\nFull load complete.")
     print(f"Next incremental run starts at ORD{NUM_ORDERS_FULL + 1:07d}")
 
 
@@ -276,7 +276,7 @@ def run_incremental(n_orders=NUM_ORDERS_INCREMENTAL):
         "mode": "incremental",
     })
 
-    print(f"\nIncremental load complete.")
+    print("\nIncremental load complete.")
     print(f"Next run starts at ORD{next_order_id + n_orders:07d}")
 
 
