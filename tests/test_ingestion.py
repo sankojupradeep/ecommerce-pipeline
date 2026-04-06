@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
-
+import sys
 
 # ── Mock boto3 so tests run without AWS credentials ───────────────────────────
 @pytest.fixture(autouse=True)
@@ -13,7 +13,7 @@ def mock_boto3():
 
 
 # ── Import after mocking boto3 ────────────────────────────────────────────────
-import sys
+
 
 
 @pytest.fixture
@@ -213,3 +213,4 @@ class TestSchemaDrift:
         ]
         violations = [p for p in payments if p["amount"] < 0]
         assert len(violations) == 1
+
